@@ -35,12 +35,21 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.0.0"]
 local-embeddings = ["sentence-transformers>=2.0.0"]
-all = ["openai>=1.0.0", "sentence-transformers>=2.0.0"]
+ollama = [
+    "ollama>=0.1.0",
+    "sentence-transformers>=2.0.0"
+]
+all = [
+    "openai>=1.0.0", 
+    "sentence-transformers>=2.0.0", 
+    "ollama>=0.1.0"
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
+    "ollama>=0.1.0"
 ]
 
 [project.urls]

@@ -304,6 +304,47 @@ agent = AnamnesisAgent(
 )
 ```
 
+## 🤖 Ollama Integration
+
+### Local AI Testing
+
+Anamnesis supports local AI models via Ollama, enabling privacy-first and offline memory learning.
+
+#### Prerequisites
+- Install [Ollama](https://ollama.ai)
+- Pull a model: `ollama pull mistral`
+
+#### Example Ollama Setup
+
+```python
+from sentence_transformers import SentenceTransformer
+import ollama
+
+def local_embedding_fn(text):
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    return model.encode(text).tolist()
+
+def ollama_inference(prompt):
+    response = ollama.chat(model="mistral", messages=[
+        {'role': 'system', 'content': 'You are a helpful AI assistant.'},
+        {'role': 'user', 'content': prompt}
+    ])
+    return response['message']['content']
+
+agent = AnamnesisAgent(
+    db_path="./ollama_memories.db",
+    embedding_fn=local_embedding_fn,
+    inference_fn=ollama_inference
+)
+```
+
+### Testing
+
+Run Ollama-specific tests:
+```bash
+pytest test_ollama.py
+```
+
 ## 🔮 Future Enhancements
 
 1. **Multi-user support** - Separate memory banks per user
