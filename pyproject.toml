@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anamnesis"
+version = "0.1.0"
+description = "Self-Evolving Memory for AI Agents - Q-value learning meets RAG"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Quantum Minds United", email = "mark@quantummindsunited.com"}
+]
+keywords = [
+    "ai", "memory", "agents", "rag", "reinforcement-learning",
+    "llm", "episodic-memory", "q-learning"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+local-embeddings = ["sentence-transformers>=2.0.0"]
+all = ["openai>=1.0.0", "sentence-transformers>=2.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/quantummindsunited/anamnesis"
+Documentation = "https://github.com/quantummindsunited/anamnesis#readme"
+Repository = "https://github.com/quantummindsunited/anamnesis"
+Issues = "https://github.com/quantummindsunited/anamnesis/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I", "N"]
+ignore = ["E501"]  # line too long - let black handle it
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
