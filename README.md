@@ -1,4 +1,5 @@
 # Anamnesis
+<img width="491" height="492" alt="image" src="https://github.com/user-attachments/assets/0b587668-59ec-414c-bac3-2ebd0c295cf9" />
 
 **Self-Evolving Memory for AI Agents**
 
