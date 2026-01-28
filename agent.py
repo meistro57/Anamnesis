@@ -12,16 +12,27 @@ Key Features:
 4. Event hooks for custom integrations
 """
 
+import logging
 import os
 import json
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Callable, Tuple
 from dataclasses import dataclass
 
-from core import (
-    MemRLStore, TwoPhaseRetriever, QLearner,
-    EpisodicMemory, create_memory_id
-)
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+try:
+    from .core import (
+        MemRLStore, TwoPhaseRetriever, QLearner,
+        EpisodicMemory, create_memory_id
+    )
+except ImportError:
+    # Allow running as standalone script
+    from core import (
+        MemRLStore, TwoPhaseRetriever, QLearner,
+        EpisodicMemory, create_memory_id
+    )
 
 
 @dataclass
@@ -48,17 +59,17 @@ class FeedbackResult:
 class AnamnesisAgent:
     """
     High-level agent interface for Anamnesis
-    
+
     This is the main class you'd integrate into Chat Bridge,
     Eli GPT, or other systems.
-    
+
     Example usage:
-    
+
         agent = AnamnesisAgent("./memories.db")
-        
+
         # When user asks a question
         context = agent.get_context("How do I meditate?", task_type="spiritual")
-        
+
         # After responding, record the interaction
         memory_id = agent.record_interaction(
             task_type="spiritual",
@@ -67,10 +78,15 @@ class AnamnesisAgent:
             context="User is new to meditation",
             success=True
         )
-        
+
         # When user gives feedback (thumbs up/down)
         agent.provide_feedback(memory_id, positive=True)
     """
+
+    # Validation constants
+    MAX_QUERY_LENGTH = 10000
+    MAX_RESPONSE_LENGTH = 50000
+    MAX_TASK_TYPE_LENGTH = 100
     
     def __init__(self, 
                  db_path: str = "memrl_agent.db",
@@ -95,9 +111,40 @@ class AnamnesisAgent:
         self.embedding_fn = embedding_fn
         self.on_memory_stored = on_memory_stored
         self.on_feedback = on_feedback
-        
+
         # Track current interaction for feedback
         self._current_interaction_memories: List[str] = []
+
+    def _validate_query(self, query: str) -> str:
+        """Validate and sanitize query input"""
+        if not query or not isinstance(query, str):
+            raise ValueError("Query must be a non-empty string")
+        query = query.strip()
+        if len(query) > self.MAX_QUERY_LENGTH:
+            logger.warning(f"Query truncated from {len(query)} to {self.MAX_QUERY_LENGTH} chars")
+            query = query[:self.MAX_QUERY_LENGTH]
+        return query
+
+    def _validate_task_type(self, task_type: Optional[str]) -> Optional[str]:
+        """Validate task type input"""
+        if task_type is None:
+            return None
+        if not isinstance(task_type, str):
+            raise ValueError("task_type must be a string")
+        task_type = task_type.strip()
+        if len(task_type) > self.MAX_TASK_TYPE_LENGTH:
+            raise ValueError(f"task_type must be <= {self.MAX_TASK_TYPE_LENGTH} characters")
+        return task_type
+
+    def _validate_rating(self, rating: Optional[float]) -> Optional[float]:
+        """Validate rating is within bounds"""
+        if rating is None:
+            return None
+        if not isinstance(rating, (int, float)):
+            raise ValueError("rating must be a number")
+        if rating < -1.0 or rating > 1.0:
+            raise ValueError("rating must be between -1.0 and 1.0")
+        return float(rating)
     
     def get_context(self,
                     query: str,
@@ -106,16 +153,29 @@ class AnamnesisAgent:
                     min_q: float = -0.3) -> List[RetrievalResult]:
         """
         Retrieve relevant memories to provide context for responding
-        
+
         Args:
             query: The user's question/request
             task_type: Category filter (e.g., "code_help", "spiritual")
-            num_results: How many memories to retrieve
-            min_q: Minimum Q-value threshold
-        
+            num_results: How many memories to retrieve (1-100)
+            min_q: Minimum Q-value threshold (-1.0 to 1.0)
+
         Returns:
             List of relevant memories with their Q-values
+
+        Raises:
+            ValueError: If inputs are invalid
         """
+        # Validate inputs
+        query = self._validate_query(query)
+        task_type = self._validate_task_type(task_type)
+
+        if not isinstance(num_results, int) or num_results < 1 or num_results > 100:
+            raise ValueError("num_results must be an integer between 1 and 100")
+
+        if not isinstance(min_q, (int, float)) or min_q < -1.0 or min_q > 1.0:
+            raise ValueError("min_q must be a number between -1.0 and 1.0")
+
         results = self.retriever.retrieve(
             query,
             task_type=task_type,
@@ -188,7 +248,7 @@ class AnamnesisAgent:
                            metadata: Optional[Dict[str, Any]] = None) -> str:
         """
         Record a new interaction as episodic memory
-        
+
         Args:
             task_type: Category (e.g., "code_help", "creative", "spiritual")
             query: User's query/request
@@ -198,10 +258,31 @@ class AnamnesisAgent:
             success: Whether it worked
             initial_reward: Initial Q-value (-1 to 1), defaults based on success
             metadata: Additional searchable metadata
-        
+
         Returns:
             Memory ID for later feedback
+
+        Raises:
+            ValueError: If required inputs are invalid
         """
+        # Validate inputs
+        task_type = self._validate_task_type(task_type)
+        if not task_type:
+            raise ValueError("task_type is required and cannot be empty")
+
+        query = self._validate_query(query)
+
+        if not response or not isinstance(response, str):
+            raise ValueError("response must be a non-empty string")
+        response = response.strip()
+        if len(response) > self.MAX_RESPONSE_LENGTH:
+            logger.warning(f"Response truncated from {len(response)} to {self.MAX_RESPONSE_LENGTH} chars")
+            response = response[:self.MAX_RESPONSE_LENGTH]
+
+        if not isinstance(success, bool):
+            raise ValueError("success must be a boolean")
+
+        initial_reward = self._validate_rating(initial_reward)
         if initial_reward is None:
             initial_reward = 0.5 if success else -0.3
         
@@ -242,25 +323,36 @@ class AnamnesisAgent:
                          reason: str = "") -> Optional[FeedbackResult]:
         """
         Provide feedback on a memory (or the most recent interaction)
-        
+
         Args:
             memory_id: Specific memory to update, or None for most recent
             positive: Simple thumbs up/down
             rating: Fine-grained rating (-1 to 1), overrides positive
             reason: Why this feedback was given
-        
+
         Returns:
-            FeedbackResult with Q-value changes
+            FeedbackResult with Q-value changes, or None if memory not found
+
+        Raises:
+            ValueError: If rating is out of bounds
         """
+        # Validate rating if provided
+        rating = self._validate_rating(rating)
+
         if memory_id is None:
             if not self._current_interaction_memories:
+                logger.warning("No current interaction memories to provide feedback for")
                 return None
             memory_id = self._current_interaction_memories[0]
-        
+
+        if not isinstance(memory_id, str) or not memory_id.strip():
+            raise ValueError("memory_id must be a non-empty string")
+
         memory = self.store.get_memory(memory_id)
         if not memory:
+            logger.warning(f"Memory {memory_id} not found for feedback")
             return None
-        
+
         # Determine reward signal
         if rating is not None:
             reward = rating
@@ -280,25 +372,34 @@ class AnamnesisAgent:
             improvement=new_q - old_q
         )
     
-    def bulk_feedback(self, 
+    def bulk_feedback(self,
                       task_success: bool,
                       explicit_rating: Optional[float] = None) -> Dict[str, float]:
         """
         Provide feedback for all memories used in current interaction
-        
+
         This is useful when you want to credit all retrieved memories
         based on overall task outcome.
-        
+
         Args:
             task_success: Did the overall task succeed?
             explicit_rating: Optional user rating (-1 to 1)
-        
+
         Returns:
             Dict mapping memory_id to new Q-value
+
+        Raises:
+            ValueError: If inputs are invalid
         """
+        if not isinstance(task_success, bool):
+            raise ValueError("task_success must be a boolean")
+
+        explicit_rating = self._validate_rating(explicit_rating)
+
         if not self._current_interaction_memories:
+            logger.debug("No current interaction memories for bulk feedback")
             return {}
-        
+
         return self.learner.batch_update(
             self._current_interaction_memories,
             task_success,
@@ -308,6 +409,21 @@ class AnamnesisAgent:
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the memory system"""
         return self.store.get_stats()
+
+    def get_memory_q_value(self, memory_id: str) -> Optional[float]:
+        """
+        Get the current Q-value for a specific memory
+
+        Args:
+            memory_id: ID of the memory to query
+
+        Returns:
+            Q-value of the memory, or None if memory doesn't exist
+        """
+        memory = self.store.get_memory(memory_id)
+        if memory:
+            return memory.q_value
+        return None
     
     def get_top_memories(self, 
                          n: int = 10,
@@ -383,40 +499,46 @@ def demo_integration():
     """
     Demonstrate how Anamnesis would integrate with a chat system
     """
-    print("=" * 60)
-    print("Anamnesis Integration Demo")
-    print("=" * 60)
-    
+    # Configure logging for demo
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    logger.info("=" * 60)
+    logger.info("Anamnesis Integration Demo")
+    logger.info("=" * 60)
+
     # Initialize agent
     agent = AnamnesisAgent("./integration_demo.db")
-    
+
     # Simulate a conversation flow
-    
+
     # 1. User asks a question
     user_query = "How can I quiet my mind during meditation?"
-    print(f"\n👤 User: {user_query}")
-    
+    logger.info(f"User: {user_query}")
+
     # 2. Check for relevant past experiences
     context = agent.get_context(user_query, task_type="spiritual")
-    
+
     if context:
-        print("\n📚 Retrieved context from past experiences:")
+        logger.info("Retrieved context from past experiences:")
         for c in context:
-            print(f"   Q={c.q_value:.2f}: {c.action_taken[:60]}...")
-        
+            logger.info(f"   Q={c.q_value:.2f}: {c.action_taken[:60]}...")
+
         # This would be injected into the LLM prompt
         prompt_context = agent.format_context_for_prompt(context)
-        print(f"\n📝 Context for LLM prompt:\n{prompt_context}")
+        logger.info(f"Context for LLM prompt:\n{prompt_context}")
     else:
-        print("\n📚 No relevant past experiences found")
-    
+        logger.info("No relevant past experiences found")
+
     # 3. Generate response (simulated)
-    assistant_response = """Try the 'noting' technique: when thoughts arise, 
-simply label them as 'thinking' and return to your breath. 
+    assistant_response = """Try the 'noting' technique: when thoughts arise,
+simply label them as 'thinking' and return to your breath.
 Don't fight the thoughts - acknowledge and release them."""
-    
-    print(f"\n🤖 Assistant: {assistant_response}")
-    
+
+    logger.info(f"Assistant: {assistant_response}")
+
     # 4. Record this interaction
     memory_id = agent.record_interaction(
         task_type="spiritual",
@@ -426,22 +548,22 @@ Don't fight the thoughts - acknowledge and release them."""
         success=True,
         metadata={"topic": "meditation", "technique": "noting"}
     )
-    print(f"\n💾 Recorded interaction as memory: {memory_id}")
-    
+    logger.info(f"Recorded interaction as memory: {memory_id}")
+
     # 5. Simulate user feedback
-    print("\n👍 User gives positive feedback")
+    logger.info("User gives positive feedback")
     result = agent.provide_feedback(memory_id, positive=True, reason="User tried it and it helped")
-    print(f"   Q-value: {result.old_q:.3f} → {result.new_q:.3f}")
-    
+    logger.info(f"   Q-value: {result.old_q:.3f} -> {result.new_q:.3f}")
+
     # 6. Show stats
-    print("\n📊 Agent Statistics:")
+    logger.info("Agent Statistics:")
     stats = agent.get_stats()
     for key, value in stats.items():
-        print(f"   {key}: {value}")
-    
-    print("\n" + "=" * 60)
-    print("Integration demo complete!")
-    print("=" * 60)
+        logger.info(f"   {key}: {value}")
+
+    logger.info("=" * 60)
+    logger.info("Integration demo complete!")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
