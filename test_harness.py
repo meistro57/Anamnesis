@@ -18,13 +18,19 @@ import sys
 import random
 from datetime import datetime, timedelta
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from core import (
-    MemRLStore, TwoPhaseRetriever, QLearner, 
-    EpisodicMemory, create_memory_id
-)
+# Support both package import and standalone execution
+try:
+    from .core import (
+        MemRLStore, TwoPhaseRetriever, QLearner,
+        EpisodicMemory, create_memory_id
+    )
+except ImportError:
+    # Allow running as standalone script
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from core import (
+        MemRLStore, TwoPhaseRetriever, QLearner,
+        EpisodicMemory, create_memory_id
+    )
 
 
 def generate_test_memories():

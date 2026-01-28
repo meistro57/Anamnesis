@@ -74,6 +74,41 @@ Anamnesis:        Query → Semantic Search → Q-Value Ranking → Results
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## 📦 Installation
+
+### From PyPI (when published)
+
+```bash
+pip install anamnesis
+```
+
+### From Source
+
+```bash
+git clone https://github.com/quantummindsunited/anamnesis.git
+cd anamnesis
+pip install -e .
+```
+
+### With Optional Dependencies
+
+```bash
+# For OpenAI embeddings
+pip install anamnesis[openai]
+
+# For local embeddings (sentence-transformers)
+pip install anamnesis[local-embeddings]
+
+# For Ollama integration
+pip install anamnesis[ollama]
+
+# For all optional dependencies
+pip install anamnesis[all]
+
+# For development
+pip install anamnesis[dev]
+```
+
 ## 🚀 Quick Start
 
 ### Basic Usage
@@ -308,41 +343,138 @@ agent = AnamnesisAgent(
 
 ### Local AI Testing
 
-Anamnesis supports local AI models via Ollama, enabling privacy-first and offline memory learning.
+Anamnesis supports local embeddings via sentence-transformers, enabling privacy-first and offline memory learning.
 
 #### Prerequisites
-- Install [Ollama](https://ollama.ai)
-- Pull a model: `ollama pull mistral`
+- Install dependencies: `pip install anamnesis[ollama]`
+- For LLM inference: Install [Ollama](https://ollama.ai) and pull a model: `ollama pull mistral`
 
-#### Example Ollama Setup
+#### Example Local Setup
 
 ```python
-from sentence_transformers import SentenceTransformer
-import ollama
+from anamnesis import AnamnesisAgent, create_sentence_transformer_fn
 
-def local_embedding_fn(text):
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    return model.encode(text).tolist()
-
-def ollama_inference(prompt):
-    response = ollama.chat(model="mistral", messages=[
-        {'role': 'system', 'content': 'You are a helpful AI assistant.'},
-        {'role': 'user', 'content': prompt}
-    ])
-    return response['message']['content']
+# Create local embedding function (no API needed)
+embedding_fn = create_sentence_transformer_fn("all-MiniLM-L6-v2")
 
 agent = AnamnesisAgent(
-    db_path="./ollama_memories.db",
-    embedding_fn=local_embedding_fn,
-    inference_fn=ollama_inference
+    db_path="./local_memories.db",
+    embedding_fn=embedding_fn
 )
+
+# Record and retrieve memories locally
+memory_id = agent.record_interaction(
+    task_type="code_help",
+    query="How to sort a list in Python?",
+    response="Use list.sort() for in-place or sorted() for a new list",
+    success=True
+)
+
+# Retrieve relevant context for new queries
+context = agent.get_context("Python sorting methods")
+```
+
+#### Using with Ollama for LLM Inference
+
+```python
+import ollama
+from anamnesis import AnamnesisAgent, create_sentence_transformer_fn
+
+# Setup embedding function
+embedding_fn = create_sentence_transformer_fn("all-MiniLM-L6-v2")
+agent = AnamnesisAgent(embedding_fn=embedding_fn)
+
+# Use Ollama for LLM inference (separate from Anamnesis)
+def get_response_with_memory(query: str) -> str:
+    # Get relevant memories
+    context = agent.get_context(query)
+    prompt_context = agent.format_context_for_prompt(context)
+
+    # Generate response using Ollama
+    response = ollama.chat(model="mistral", messages=[
+        {'role': 'system', 'content': f'You are a helpful AI assistant.\n\n{prompt_context}'},
+        {'role': 'user', 'content': query}
+    ])
+    return response['message']['content']
 ```
 
 ### Testing
 
 Run Ollama-specific tests:
 ```bash
-pytest test_ollama.py
+pip install anamnesis[ollama]
+pytest test_ollama.py -v
+```
+
+## 📖 API Reference
+
+### AnamnesisAgent
+
+The main class for integrating Anamnesis into your application.
+
+#### Constructor
+
+```python
+AnamnesisAgent(
+    db_path: str = "memrl_agent.db",
+    embedding_fn: Optional[Callable[[str], List[float]]] = None,
+    learning_rate: float = 0.15,
+    on_memory_stored: Optional[Callable[[EpisodicMemory], None]] = None,
+    on_feedback: Optional[Callable[[str, float, float], None]] = None
+)
+```
+
+#### Methods
+
+| Method | Description | Returns |
+|--------|-------------|---------|
+| `get_context(query, task_type, num_results, min_q)` | Retrieve relevant memories | `List[RetrievalResult]` |
+| `format_context_for_prompt(results, max_chars)` | Format memories for LLM prompt | `str` |
+| `record_interaction(task_type, query, response, ...)` | Store a new memory | `str` (memory ID) |
+| `provide_feedback(memory_id, positive, rating, reason)` | Update Q-value from feedback | `FeedbackResult` |
+| `bulk_feedback(task_success, explicit_rating)` | Feedback for all used memories | `Dict[str, float]` |
+| `get_stats()` | Get memory store statistics | `Dict[str, Any]` |
+| `get_top_memories(n, task_type)` | Get highest Q-value memories | `List[RetrievalResult]` |
+| `get_memory_q_value(memory_id)` | Get Q-value for a memory | `Optional[float]` |
+| `run_maintenance(decay_unused_days, decay_factor)` | Decay unused memories | `Dict[str, int]` |
+
+### Error Handling
+
+Anamnesis raises `ValueError` for invalid inputs:
+
+```python
+from anamnesis import AnamnesisAgent
+
+agent = AnamnesisAgent()
+
+# Handle validation errors
+try:
+    # Invalid: empty query
+    context = agent.get_context("")
+except ValueError as e:
+    print(f"Invalid input: {e}")
+
+try:
+    # Invalid: rating out of bounds
+    agent.provide_feedback(memory_id, rating=2.0)  # Must be -1.0 to 1.0
+except ValueError as e:
+    print(f"Invalid rating: {e}")
+
+try:
+    # Invalid: num_results out of bounds
+    context = agent.get_context("query", num_results=200)  # Must be 1-100
+except ValueError as e:
+    print(f"Invalid num_results: {e}")
+```
+
+Database errors are logged and re-raised:
+
+```python
+import logging
+
+# Enable debug logging to see database operations
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("anamnesis")
 ```
 
 ## 🔮 Future Enhancements

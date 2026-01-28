@@ -48,11 +48,13 @@ class TestOllamaIntegration:
             ])
             return response['message']['content']
         
+        # Store inference function for use in tests if needed
+        self.ollama_inference = ollama_inference
+
         # Initialize Anamnesis Agent
         self.agent = AnamnesisAgent(
             db_path=self.test_db_path,
-            embedding_fn=local_embedding_fn,
-            inference_fn=ollama_inference
+            embedding_fn=local_embedding_fn
         )
     
     def test_memory_recording(self):
@@ -96,10 +98,10 @@ class TestOllamaIntegration:
         
         # Retrieve context for a new query
         new_query = "Python list comprehension syntax"
-        context = self.agent.get_context(new_query, task_type="coding", top_k=3)
-        
+        context = self.agent.get_context(new_query, task_type="coding", num_results=3)
+
         assert len(context) > 0, "Context retrieval failed"
-        assert any("list comprehension" in item.get('query', '').lower() for item in context), "Relevant memory not retrieved"
+        assert any("list comprehension" in item.query_summary.lower() for item in context), "Relevant memory not retrieved"
     
     def test_embedding_similarity(self):
         """
@@ -122,8 +124,8 @@ class TestOllamaIntegration:
             )
         
         # Test retrieval with semantically similar query
-        context = self.agent.get_context("Python list methods", task_type="coding", top_k=2)
-        
+        context = self.agent.get_context("Python list methods", task_type="coding", num_results=2)
+
         assert len(context) > 0, "Semantic retrieval failed"
         
     def test_q_value_learning(self):

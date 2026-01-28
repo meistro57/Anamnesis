@@ -19,11 +19,16 @@ Repository: https://github.com/[your-username]/anamnesis
 import sqlite3
 import json
 import hashlib
+import logging
 import numpy as np
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Generator
 from pathlib import Path
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,101 +54,120 @@ class MemRLStore:
     """
     SQLite-backed episodic memory store with Q-value tracking
     """
-    
+
     def __init__(self, db_path: str = "memrl_memories.db"):
         self.db_path = db_path
         self._init_db()
-    
-    def _init_db(self):
+
+    @contextmanager
+    def _get_connection(self) -> Generator[sqlite3.Connection, None, None]:
+        """Context manager for database connections with proper error handling"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            yield conn
+        except sqlite3.Error as e:
+            logger.error(f"Database error: {e}")
+            if conn:
+                conn.rollback()
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+    def _init_db(self) -> None:
         """Initialize database schema"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
-                task_type TEXT NOT NULL,
-                query_summary TEXT NOT NULL,
-                context_summary TEXT,
-                action_taken TEXT NOT NULL,
-                outcome_description TEXT,
-                success INTEGER NOT NULL,
-                reward REAL NOT NULL,
-                q_value REAL NOT NULL,
-                embedding TEXT,
-                retrieval_count INTEGER DEFAULT 0,
-                last_retrieved TEXT,
-                created_at TEXT NOT NULL,
-                metadata TEXT
-            )
-        """)
-        
-        # Index for efficient retrieval
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_type ON memories(task_type)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_q_value ON memories(q_value DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_created ON memories(created_at DESC)")
-        
-        # Q-value update history for analysis
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS q_updates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                memory_id TEXT NOT NULL,
-                old_q REAL NOT NULL,
-                new_q REAL NOT NULL,
-                reward_signal REAL NOT NULL,
-                update_reason TEXT,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (memory_id) REFERENCES memories(id)
-            )
-        """)
-        
-        conn.commit()
-        conn.close()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS memories (
+                        id TEXT PRIMARY KEY,
+                        task_type TEXT NOT NULL,
+                        query_summary TEXT NOT NULL,
+                        context_summary TEXT,
+                        action_taken TEXT NOT NULL,
+                        outcome_description TEXT,
+                        success INTEGER NOT NULL,
+                        reward REAL NOT NULL,
+                        q_value REAL NOT NULL,
+                        embedding TEXT,
+                        retrieval_count INTEGER DEFAULT 0,
+                        last_retrieved TEXT,
+                        created_at TEXT NOT NULL,
+                        metadata TEXT
+                    )
+                """)
+
+                # Index for efficient retrieval
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_type ON memories(task_type)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_q_value ON memories(q_value DESC)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_created ON memories(created_at DESC)")
+
+                # Q-value update history for analysis
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS q_updates (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        memory_id TEXT NOT NULL,
+                        old_q REAL NOT NULL,
+                        new_q REAL NOT NULL,
+                        reward_signal REAL NOT NULL,
+                        update_reason TEXT,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (memory_id) REFERENCES memories(id)
+                    )
+                """)
+
+                conn.commit()
+                logger.debug(f"Database initialized at {self.db_path}")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to initialize database: {e}")
+            raise
     
     def store_memory(self, memory: EpisodicMemory) -> str:
         """Store a new episodic memory"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT OR REPLACE INTO memories 
-            (id, task_type, query_summary, context_summary, action_taken, 
-             outcome_description, success, reward, q_value, embedding,
-             retrieval_count, last_retrieved, created_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            memory.id,
-            memory.task_type,
-            memory.query_summary,
-            memory.context_summary,
-            memory.action_taken,
-            memory.outcome_description,
-            1 if memory.success else 0,
-            memory.reward,
-            memory.q_value,
-            json.dumps(memory.embedding) if memory.embedding else None,
-            memory.retrieval_count,
-            memory.last_retrieved,
-            memory.created_at,
-            json.dumps(memory.metadata)
-        ))
-        
-        conn.commit()
-        conn.close()
-        return memory.id
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO memories
+                (id, task_type, query_summary, context_summary, action_taken,
+                 outcome_description, success, reward, q_value, embedding,
+                 retrieval_count, last_retrieved, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                memory.id,
+                memory.task_type,
+                memory.query_summary,
+                memory.context_summary,
+                memory.action_taken,
+                memory.outcome_description,
+                1 if memory.success else 0,
+                memory.reward,
+                memory.q_value,
+                json.dumps(memory.embedding) if memory.embedding else None,
+                memory.retrieval_count,
+                memory.last_retrieved,
+                memory.created_at,
+                json.dumps(memory.metadata)
+            ))
+
+            conn.commit()
+            logger.debug(f"Stored memory {memory.id}")
+            return memory.id
     
     def get_memory(self, memory_id: str) -> Optional[EpisodicMemory]:
         """Retrieve a single memory by ID"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return self._row_to_memory(row)
-        return None
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
+            row = cursor.fetchone()
+
+            if row:
+                return self._row_to_memory(row)
+            return None
     
     def _row_to_memory(self, row) -> EpisodicMemory:
         """Convert database row to EpisodicMemory object"""
@@ -164,144 +188,139 @@ class MemRLStore:
             metadata=json.loads(row[13]) if row[13] else {}
         )
     
-    def update_q_value(self, memory_id: str, new_q: float, 
+    def update_q_value(self, memory_id: str, new_q: float,
                        reward_signal: float, reason: str = "") -> bool:
         """
         Update Q-value for a memory and log the change
-        
+
         This is the core learning mechanism - memories that prove useful
         get higher Q-values, making them more likely to be retrieved.
         """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Get current Q-value
-        cursor.execute("SELECT q_value FROM memories WHERE id = ?", (memory_id,))
-        row = cursor.fetchone()
-        if not row:
-            conn.close()
-            return False
-        
-        old_q = row[0]
-        
-        # Update Q-value
-        cursor.execute(
-            "UPDATE memories SET q_value = ? WHERE id = ?",
-            (new_q, memory_id)
-        )
-        
-        # Log the update for analysis
-        cursor.execute("""
-            INSERT INTO q_updates (memory_id, old_q, new_q, reward_signal, update_reason, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (memory_id, old_q, new_q, reward_signal, reason, datetime.now().isoformat()))
-        
-        conn.commit()
-        conn.close()
-        return True
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Get current Q-value
+            cursor.execute("SELECT q_value FROM memories WHERE id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"Memory {memory_id} not found for Q-value update")
+                return False
+
+            old_q = row[0]
+
+            # Update Q-value
+            cursor.execute(
+                "UPDATE memories SET q_value = ? WHERE id = ?",
+                (new_q, memory_id)
+            )
+
+            # Log the update for analysis
+            cursor.execute("""
+                INSERT INTO q_updates (memory_id, old_q, new_q, reward_signal, update_reason, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (memory_id, old_q, new_q, reward_signal, reason, datetime.now().isoformat()))
+
+            conn.commit()
+            logger.debug(f"Updated Q-value for {memory_id}: {old_q:.3f} -> {new_q:.3f}")
+            return True
     
-    def increment_retrieval(self, memory_id: str):
+    def increment_retrieval(self, memory_id: str) -> None:
         """Mark a memory as having been retrieved"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            UPDATE memories 
-            SET retrieval_count = retrieval_count + 1,
-                last_retrieved = ?
-            WHERE id = ?
-        """, (datetime.now().isoformat(), memory_id))
-        
-        conn.commit()
-        conn.close()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE memories
+                SET retrieval_count = retrieval_count + 1,
+                    last_retrieved = ?
+                WHERE id = ?
+            """, (datetime.now().isoformat(), memory_id))
+
+            conn.commit()
     
     def get_all_memories(self, task_type: Optional[str] = None) -> List[EpisodicMemory]:
         """Get all memories, optionally filtered by task type"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        if task_type:
-            cursor.execute(
-                "SELECT * FROM memories WHERE task_type = ? ORDER BY q_value DESC",
-                (task_type,)
-            )
-        else:
-            cursor.execute("SELECT * FROM memories ORDER BY q_value DESC")
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        return [self._row_to_memory(row) for row in rows]
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            if task_type:
+                cursor.execute(
+                    "SELECT * FROM memories WHERE task_type = ? ORDER BY q_value DESC",
+                    (task_type,)
+                )
+            else:
+                cursor.execute("SELECT * FROM memories ORDER BY q_value DESC")
+
+            rows = cursor.fetchall()
+            return [self._row_to_memory(row) for row in rows]
     
     def get_top_by_q_value(self, n: int = 10, task_type: Optional[str] = None) -> List[EpisodicMemory]:
         """Get top N memories by Q-value"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        if task_type:
-            cursor.execute(
-                "SELECT * FROM memories WHERE task_type = ? ORDER BY q_value DESC LIMIT ?",
-                (task_type, n)
-            )
-        else:
-            cursor.execute("SELECT * FROM memories ORDER BY q_value DESC LIMIT ?", (n,))
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        return [self._row_to_memory(row) for row in rows]
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            if task_type:
+                cursor.execute(
+                    "SELECT * FROM memories WHERE task_type = ? ORDER BY q_value DESC LIMIT ?",
+                    (task_type, n)
+                )
+            else:
+                cursor.execute("SELECT * FROM memories ORDER BY q_value DESC LIMIT ?", (n,))
+
+            rows = cursor.fetchall()
+            return [self._row_to_memory(row) for row in rows]
     
-    def get_q_update_history(self, memory_id: str) -> List[Dict]:
+    def get_q_update_history(self, memory_id: str) -> List[Dict[str, Any]]:
         """Get the Q-value update history for a memory"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT old_q, new_q, reward_signal, update_reason, updated_at
-            FROM q_updates WHERE memory_id = ? ORDER BY updated_at
-        """, (memory_id,))
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        return [
-            {
-                "old_q": row[0],
-                "new_q": row[1],
-                "reward_signal": row[2],
-                "reason": row[3],
-                "timestamp": row[4]
-            }
-            for row in rows
-        ]
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT old_q, new_q, reward_signal, update_reason, updated_at
+                FROM q_updates WHERE memory_id = ? ORDER BY updated_at
+            """, (memory_id,))
+
+            rows = cursor.fetchall()
+
+            return [
+                {
+                    "old_q": row[0],
+                    "new_q": row[1],
+                    "reward_signal": row[2],
+                    "reason": row[3],
+                    "timestamp": row[4]
+                }
+                for row in rows
+            ]
     
     def get_stats(self) -> Dict[str, Any]:
         """Get overall statistics about the memory store"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        stats = {}
-        
-        cursor.execute("SELECT COUNT(*) FROM memories")
-        stats["total_memories"] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT AVG(q_value) FROM memories")
-        stats["avg_q_value"] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT task_type, COUNT(*) FROM memories GROUP BY task_type")
-        stats["by_task_type"] = dict(cursor.fetchall())
-        
-        cursor.execute("SELECT COUNT(*) FROM memories WHERE success = 1")
-        stats["successful_memories"] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT SUM(retrieval_count) FROM memories")
-        stats["total_retrievals"] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM q_updates")
-        stats["total_q_updates"] = cursor.fetchone()[0]
-        
-        conn.close()
-        return stats
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            stats: Dict[str, Any] = {}
+
+            cursor.execute("SELECT COUNT(*) FROM memories")
+            stats["total_memories"] = cursor.fetchone()[0]
+
+            cursor.execute("SELECT AVG(q_value) FROM memories")
+            result = cursor.fetchone()[0]
+            stats["avg_q_value"] = result if result is not None else 0.0
+
+            cursor.execute("SELECT task_type, COUNT(*) FROM memories GROUP BY task_type")
+            stats["by_task_type"] = dict(cursor.fetchall())
+
+            cursor.execute("SELECT COUNT(*) FROM memories WHERE success = 1")
+            stats["successful_memories"] = cursor.fetchone()[0]
+
+            cursor.execute("SELECT SUM(retrieval_count) FROM memories")
+            result = cursor.fetchone()[0]
+            stats["total_retrievals"] = result if result is not None else 0
+
+            cursor.execute("SELECT COUNT(*) FROM q_updates")
+            stats["total_q_updates"] = cursor.fetchone()[0]
+
+            return stats
 
 
 class TwoPhaseRetriever:
@@ -500,39 +519,38 @@ class QLearner:
         
         return updates
     
-    def decay_unused(self, decay_factor: float = 0.99, 
+    def decay_unused(self, decay_factor: float = 0.99,
                      days_unused: int = 30) -> int:
         """
         Apply decay to memories that haven't been retrieved recently
-        
+
         This prevents old, unused memories from dominating just because
         they had early success.
-        
+
         Returns: Number of memories decayed
         """
-        from datetime import datetime, timedelta
-        
         cutoff = (datetime.now() - timedelta(days=days_unused)).isoformat()
-        
-        conn = sqlite3.connect(self.store.db_path)
-        cursor = conn.cursor()
-        
-        # Find memories not retrieved recently
-        cursor.execute("""
-            SELECT id, q_value FROM memories 
-            WHERE (last_retrieved IS NULL OR last_retrieved < ?)
-            AND q_value > 0
-        """, (cutoff,))
-        
-        rows = cursor.fetchall()
+
+        with self.store._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Find memories not retrieved recently
+            cursor.execute("""
+                SELECT id, q_value FROM memories
+                WHERE (last_retrieved IS NULL OR last_retrieved < ?)
+                AND q_value > 0
+            """, (cutoff,))
+
+            rows = cursor.fetchall()
+
         count = 0
-        
         for mem_id, current_q in rows:
             new_q = current_q * decay_factor
             self.store.update_q_value(mem_id, new_q, 0, f"Decay (unused {days_unused}+ days)")
             count += 1
-        
-        conn.close()
+
+        if count > 0:
+            logger.info(f"Decayed Q-values for {count} unused memories")
         return count
 
 
@@ -548,16 +566,21 @@ def create_memory_id(query: str, action: str) -> str:
 
 def demo():
     """Demonstrate the MemRL-Lite system"""
-    
-    print("=" * 60)
-    print("MemRL-Lite Demo")
-    print("=" * 60)
-    
+    # Configure logging for demo
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    logger.info("=" * 60)
+    logger.info("MemRL-Lite Demo")
+    logger.info("=" * 60)
+
     # Initialize
     store = MemRLStore("demo_memories.db")
     retriever = TwoPhaseRetriever(store)
     learner = QLearner(store, learning_rate=0.2)
-    
+
     # Create some sample memories
     sample_memories = [
         EpisodicMemory(
@@ -609,43 +632,43 @@ def demo():
             metadata={"tradition": "seth", "concept": "reality_creation"}
         ),
     ]
-    
-    print("\n📝 Storing sample memories...")
+
+    logger.info("Storing sample memories...")
     for mem in sample_memories:
         store.store_memory(mem)
-        print(f"  - Stored: {mem.query_summary[:40]}... (Q={mem.q_value})")
-    
+        logger.info(f"  Stored: {mem.query_summary[:40]}... (Q={mem.q_value})")
+
     # Test retrieval
-    print("\n🔍 Testing Two-Phase Retrieval...")
-    
+    logger.info("Testing Two-Phase Retrieval...")
+
     query = "How do I loop through items in Python?"
-    print(f"\nQuery: '{query}'")
-    
+    logger.info(f"Query: '{query}'")
+
     results = retriever.retrieve(query, task_type="code_help", phase_b_n=3)
-    
-    print(f"Results (ranked by Q-value):")
+
+    logger.info("Results (ranked by Q-value):")
     for mem, sim in results:
-        print(f"  - Q={mem.q_value:.2f} | Sim={sim:.2f} | {mem.action_taken[:50]}")
-    
+        logger.info(f"  Q={mem.q_value:.2f} | Sim={sim:.2f} | {mem.action_taken[:50]}")
+
     # Simulate feedback
     if results:
-        print("\n📊 Simulating user feedback...")
+        logger.info("Simulating user feedback...")
         best_match = results[0][0]
-        print(f"User gave positive feedback on: {best_match.action_taken[:40]}...")
-        
+        logger.info(f"User gave positive feedback on: {best_match.action_taken[:40]}...")
+
         old_q = best_match.q_value
         new_q = learner.update_from_feedback(best_match.id, reward=1.0, reason="User explicit thumbs up")
-        print(f"Q-value updated: {old_q:.2f} → {new_q:.2f}")
-    
+        logger.info(f"Q-value updated: {old_q:.2f} -> {new_q:.2f}")
+
     # Show stats
-    print("\n📈 Memory Store Statistics:")
+    logger.info("Memory Store Statistics:")
     stats = store.get_stats()
     for key, value in stats.items():
-        print(f"  {key}: {value}")
-    
-    print("\n" + "=" * 60)
-    print("Demo complete!")
-    print("=" * 60)
+        logger.info(f"  {key}: {value}")
+
+    logger.info("=" * 60)
+    logger.info("Demo complete!")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
